@@ -359,6 +359,190 @@ void test_transform_executable_to_dylib() {
     print_test_footer("transform_executable_to_dylib", success);
 }
 
+static uint32_t add_mock_dylib_cmd(uint8_t *buffer, uint32_t current_offset, uint32_t cmd_type, const char *path) {
+    struct dylib_command *cmd = (struct dylib_command *)(buffer + current_offset);
+    size_t path_len = strlen(path) + 1;
+    uint32_t cmdsize = (uint32_t)((sizeof(struct dylib_command) + path_len + 7) & ~7);
+
+    memset(cmd, 0, cmdsize);
+    cmd->cmd = cmd_type;
+    cmd->cmdsize = cmdsize;
+    cmd->dylib.name.offset = sizeof(struct dylib_command);
+    cmd->dylib.timestamp = 2;
+    cmd->dylib.current_version = 0x10000;
+    cmd->dylib.compatibility_version = 0x10000;
+    memcpy((uint8_t *)cmd + sizeof(struct dylib_command), path, path_len);
+
+    return cmdsize;
+}
+
+void test_normalize_frameworks() {
+    print_test_header("normalize_frameworks");
+    
+    bool success = true;
+    uint32_t ncmds = 0;
+    uint32_t sizeofcmds = 0;
+    bool verbose = false;
+    uint8_t buffer[2048];
+    memset(buffer, 0, sizeof(buffer));
+    size_t max_sizeofcmds = sizeof(buffer);
+    ncmds = 0;
+    sizeofcmds = 0;
+
+    struct build_version_command *bvc = (struct build_version_command *)buffer;
+    bvc->cmd = LC_BUILD_VERSION;
+    bvc->cmdsize = sizeof(struct build_version_command);
+    bvc->platform = PLATFORM_MACOS;
+    bvc->minos = 0x000B0000;
+    bvc->sdk = 0x000C0000;
+    sizeofcmds += bvc->cmdsize;
+    ncmds++;
+
+    const char *path_macos = "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation";
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_macos);
+    ncmds++;
+
+    const char *path_ios = "/System/Library/Frameworks/Foundation.framework/Foundation";
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_ios);
+    ncmds++;
+
+    const char *path_other = "/usr/lib/libSystem.B.dylib";
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_other);
+    ncmds++;
+
+    const char *path_macos2 = "/System/Library/Frameworks/UIKit.framework/Versions/A/UIKit";
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_WEAK_DYLIB, path_macos2);
+    ncmds++;
+
+    uint32_t initial_sizeofcmds_ios = sizeofcmds;
+    uint32_t target_platform_ios = PLATFORM_IOSSIMULATOR;
+
+    assert(perform_framework_normalization(buffer, ncmds, &sizeofcmds, max_sizeofcmds, target_platform_ios, verbose));
+
+    uint8_t *p = buffer;
+    uint32_t current_offset = 0;
+    int found_cf = 0, found_fnd = 0, found_sys = 0, found_uikit = 0;
+    const char *expected_cf_ios = "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+    const char *expected_uikit_ios = "/System/Library/Frameworks/UIKit.framework/UIKit";
+
+    for (uint32_t i = 0; i < ncmds; ++i) {
+        struct load_command *lc = (struct load_command *)p;
+        assert((p + lc->cmdsize) <= (buffer + sizeofcmds));
+
+        if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) {
+            struct dylib_command *dcmd = (struct dylib_command *)lc;
+            const char *path = (const char *)dcmd + dcmd->dylib.name.offset;
+            if (strstr(path, "CoreFoundation")) {
+                assert(strcmp(path, expected_cf_ios) == 0);
+                found_cf++;
+            }
+            else if (strstr(path, "Foundation")) {
+                assert(strcmp(path, path_ios) == 0);
+                found_fnd++;
+            }
+            else if (strstr(path, "libSystem")) {
+                assert(strcmp(path, path_other) == 0);
+                found_sys++;
+            }
+            else if (strstr(path, "UIKit")) {
+                assert(strcmp(path, expected_uikit_ios) == 0);
+                found_uikit++;
+            }
+        }
+
+        p += lc->cmdsize;
+        current_offset += lc->cmdsize;
+    }
+    assert(found_cf == 1);
+    assert(found_fnd == 1);
+    assert(found_sys == 1);
+    assert(found_uikit == 1);
+    assert(current_offset == sizeofcmds);
+
+    uint32_t size_cf_orig = (sizeof(struct dylib_command) + strlen(path_macos) + 1 + 7) & ~7;
+    uint32_t size_fnd_orig = (sizeof(struct dylib_command) + strlen(path_ios) + 1 + 7) & ~7;
+    uint32_t size_sys_orig = (sizeof(struct dylib_command) + strlen(path_other) + 1 + 7) & ~7;
+    uint32_t size_uikit_orig = (sizeof(struct dylib_command) + strlen(path_macos2) + 1 + 7) & ~7;
+    uint32_t size_cf_new = (sizeof(struct dylib_command) + strlen(expected_cf_ios) + 1 + 7) & ~7;
+    uint32_t size_uikit_new = (sizeof(struct dylib_command) + strlen(expected_uikit_ios) + 1 + 7) & ~7;
+    uint32_t expected_sizeofcmds_ios = sizeof(struct build_version_command) + size_cf_new + size_fnd_orig + size_sys_orig + size_uikit_new;
+    printf("  iOS Target - Initial Size: %u, Final Size: %u, Expected Final Size: %u\n", initial_sizeofcmds_ios, sizeofcmds, expected_sizeofcmds_ios);
+    assert(sizeofcmds == expected_sizeofcmds_ios);
+
+    memset(buffer, 0, sizeof(buffer));
+    ncmds = 0;
+    sizeofcmds = 0;
+
+    bvc = (struct build_version_command *)buffer;
+    bvc->cmd = LC_BUILD_VERSION;
+    bvc->cmdsize = sizeof(struct build_version_command);
+    bvc->platform = PLATFORM_IOS;
+    sizeofcmds += bvc->cmdsize;
+    ncmds++;
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_macos);
+    ncmds++;
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_ios);
+    ncmds++;
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_DYLIB, path_other);
+    ncmds++;
+    sizeofcmds += add_mock_dylib_cmd(buffer, sizeofcmds, LC_LOAD_WEAK_DYLIB, path_macos2);
+    ncmds++;
+
+    uint32_t initial_sizeofcmds_macos = sizeofcmds;
+    uint32_t target_platform_macos = PLATFORM_MACOS;
+    assert(perform_framework_normalization(buffer, ncmds, &sizeofcmds, max_sizeofcmds, target_platform_macos, verbose));
+
+    p = buffer;
+    current_offset = 0;
+    found_cf = 0;
+    found_fnd = 0;
+    found_sys = 0;
+    found_uikit = 0;
+    const char *expected_fnd_macos = "/System/Library/Frameworks/Foundation.framework/Versions/A/Foundation";
+
+    for (uint32_t i = 0; i < ncmds; ++i) {
+        struct load_command *lc = (struct load_command *)p;
+        assert((p + lc->cmdsize) <= (buffer + sizeofcmds));
+
+        if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB) {
+            struct dylib_command *dcmd = (struct dylib_command *)lc;
+            const char *path = (const char *)dcmd + dcmd->dylib.name.offset;
+
+            if (strstr(path, "CoreFoundation")) {
+                assert(strcmp(path, path_macos) == 0);
+                found_cf++;
+            }
+            else if (strstr(path, "Foundation")) {
+                assert(strcmp(path, expected_fnd_macos) == 0);
+                found_fnd++;
+            }
+            else if (strstr(path, "libSystem")) {
+                assert(strcmp(path, path_other) == 0);
+                found_sys++;
+            }
+            else if (strstr(path, "UIKit")) {
+                assert(strcmp(path, path_macos2) == 0);
+                found_uikit++;
+            }
+        }
+
+        p += lc->cmdsize;
+        current_offset += lc->cmdsize;
+    }
+    assert(found_cf == 1);
+    assert(found_fnd == 1);
+    assert(found_sys == 1);
+    assert(found_uikit == 1);
+    assert(current_offset == sizeofcmds);
+
+    uint32_t size_fnd_new = (sizeof(struct dylib_command) + strlen(expected_fnd_macos) + 1 + 7) & ~7;
+    uint32_t expected_sizeofcmds_macos = sizeof(struct build_version_command) + size_cf_orig + size_fnd_new + size_sys_orig + size_uikit_orig;
+    printf("  macOS Target - Initial Size: %u, Final Size: %u, Expected Final Size: %u\n", initial_sizeofcmds_macos, sizeofcmds, expected_sizeofcmds_macos);
+    assert(sizeofcmds == expected_sizeofcmds_macos);
+
+    print_test_footer("normalize_frameworks", success);
+}
+
 int main(int argc, char *argv[]) {
     printf("Starting tests...\n\n");
 
@@ -371,6 +555,7 @@ int main(int argc, char *argv[]) {
     test_patch_pagezero();
     test_add_lc_id_dylib();
     test_transform_executable_to_dylib();
+    test_normalize_frameworks();
 
     printf("All tests completed\n");
     return EXIT_SUCCESS;
