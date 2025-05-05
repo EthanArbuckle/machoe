@@ -1,3 +1,5 @@
 machoe
 *.o
 .vscode/
+tests/test_runner
+

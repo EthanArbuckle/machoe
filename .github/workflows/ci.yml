@@ -1,0 +1,32 @@
+name: machoe CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Build machoe
+      run: make
+    
+    - name: Run tests
+      run: make test
+    
+    - name: Run valgrind check (Linux only)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y valgrind
+        $(CC) $(CFLAGS) tests/unit_tests.c -o tests/test_runner
+        valgrind --leak-check=full --error-exitcode=1 ./tests/test_runner
+        rm tests/test_runner
