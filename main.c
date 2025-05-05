@@ -5,17 +5,19 @@
 //  Created by Ethan Arbuckle on 5/1/25.
 //
 
-#include <libgen.h>
 #include <dirent.h>
+#include <errno.h>
 #include <getopt.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <stdio.h>
+#include <libgen.h>
+#include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
-#include <limits.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+
 #define _FILE_OFFSET_BITS 64
 
 #if !defined(__APPLE__)
