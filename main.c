@@ -8,6 +8,7 @@
 #include <libgen.h>
 #include <dirent.h>
 #include <getopt.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -41,7 +42,85 @@ typedef struct {
     uint32_t target_minos;
     uint32_t target_sdk;
     bool verbose;
+    bool convert_to_dylib;
 } tool_config_t;
+
+
+static bool remove_lc_main(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds) {
+    uint8_t *p = commands;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmd == LC_MAIN) {
+            uint32_t size = lc->cmdsize;
+            memmove(p, p + size, *sizeofcmds - (p - commands) - size);
+            *sizeofcmds -= size;
+            return true;
+        }
+
+        p += lc->cmdsize;
+    }
+
+    return false;
+}
+
+static void patch_pagezero(uint8_t *commands, uint32_t ncmds) {
+    uint8_t *p = commands;
+    for (uint32_t i = 0; i < ncmds; i++) {
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmd == LC_SEGMENT_64) {
+            struct segment_command_64 *seg = (struct segment_command_64 *)p;
+            if (strcmp(seg->segname, "__PAGEZERO") == 0) {
+                strncpy(seg->segname, "__dylibolical", sizeof(seg->segname));
+                seg->vmsize = 0x4000;
+                seg->vmaddr -= 0x4000;
+            }
+        }
+
+        p += lc->cmdsize;
+    }
+}
+
+static bool add_lc_id_dylib(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *dylib_path) {
+    size_t name_len = strlen(dylib_path) + 1;
+    uint32_t padded_size = (sizeof(struct dylib_command) + name_len + 7) & ~7;
+
+    if (*sizeofcmds + padded_size > maxcmdsize) {
+        return false;
+    }
+
+    struct dylib_command *idcmd = (struct dylib_command *)(commands + *sizeofcmds);
+    memset(idcmd, 0, padded_size);
+    idcmd->cmd = LC_ID_DYLIB;
+    idcmd->cmdsize = padded_size;
+    idcmd->dylib.name.offset = sizeof(struct dylib_command);
+    idcmd->dylib.timestamp = 1;
+    idcmd->dylib.current_version = 0x10000;
+    idcmd->dylib.compatibility_version = 0x10000;
+    memcpy((uint8_t *)idcmd + sizeof(struct dylib_command), dylib_path, name_len);
+
+    *ncmds += 1;
+    *sizeofcmds += padded_size;
+    return true;
+}
+
+static void transform_executable_to_dylib(void *mapped, size_t filesize, const char *basename) {
+    struct mach_header_64 *header = (struct mach_header_64 *)mapped;
+    uint8_t *commands = (uint8_t *)(header + 1);
+    size_t maxcmdsize = filesize - sizeof(*header);
+
+    header->filetype = MH_DYLIB;
+    header->flags &= ~MH_PIE;
+
+    remove_lc_main(commands, header->ncmds, &header->sizeofcmds);
+    patch_pagezero(commands, header->ncmds);
+
+    char dylib_name[256];
+    snprintf(dylib_name, sizeof(dylib_name), "@rpath/%s.dylib", basename);
+
+    if (!add_lc_id_dylib(commands, &header->ncmds, &header->sizeofcmds, maxcmdsize, dylib_name)) {
+        printf("Not enough room to add LC_ID_DYLIB\n");
+    }
+}
 
 bool parse_version(const char *version_str, uint32_t *version_out) {
     uint32_t major = 0;
@@ -169,25 +248,50 @@ bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_size, cons
 
     if (header.magic != MH_MAGIC_64) {
         if (config->verbose) {
-            fprintf(stdout, "Skipping non-MH_MAGIC_64 slice at offset %lld (magic: 0x%x)\n", slice_offset, header.magic);
+            printf("Skipping non-MH_MAGIC_64 slice at offset %lld (magic: 0x%x)\n", slice_offset, header.magic);
         }
         return false;
     }
 
     if (header.cputype != CPU_TYPE_ARM64) {
         if (config->verbose) {
-            fprintf(stdout, "Skipping non-ARM64 slice at offset %lld (cputype: %d)\n", slice_offset, header.cputype);
+            printf("Skipping non-ARM64 slice at offset %lld (cputype: %d)\n", slice_offset, header.cputype);
         }
         return false;
     }
 
     if (header.sizeofcmds > slice_size - sizeof(struct mach_header_64)) {
-        printf("Invalid sizeofcmds in header at offset %lld (sizeofcmds: %u, slice size: %zu)\n",
-               slice_offset, header.sizeofcmds, slice_size);
+        printf("Invalid sizeofcmds in header at offset %lld (sizeofcmds: %u, slice size: %zu)\n", slice_offset, header.sizeofcmds, slice_size);
         return false;
     }
 
     bool modified = false;
+
+    if (config->convert_to_dylib && header.filetype == MH_EXECUTE) {
+        int fd = fileno(file);
+        void *mapped = mmap(NULL, slice_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, slice_offset);
+        if (mapped == MAP_FAILED) {
+            printf("Failed to mmap slice at offset %lld\n", slice_offset);
+            return false;
+        }
+
+        const char *base = basename((char *)config->input_path);
+        transform_executable_to_dylib(mapped, slice_size, base);
+        msync(mapped, slice_size, MS_SYNC);
+
+        munmap(mapped, slice_size);
+        modified = true;
+
+        if (config->verbose) {
+            printf("Converted slice at offset %lld to MH_DYLIB\n", slice_offset);
+        }
+
+        if (fseeko(file, slice_offset, SEEK_SET) != 0 || fread(&header, sizeof(header), 1, file) != 1) {
+            printf("Failed to reread header after dylib transform\n");
+            return false;
+        }
+    }
+
     if (config->modify_cpu) {
         cpu_subtype_t current_subtype = header.cpusubtype;
         cpu_subtype_t current_base_subtype = current_subtype & ~CPU_SUBTYPE_LIB64;
@@ -557,7 +661,8 @@ void print_usage(const char *prog_name) {
     printf("  --set-cpu <type>       Set ARM64 CPU subtype (arm64, arm64e)\n");
     printf("  --set-platform <name>  Set platform (ios, macos, ios-simulator, etc)\n");
     printf("  --minos <version>      Set min OS version (required with --set-platform)\n");
-    printf("  --sdk <version>        Set SDK version (required with --set-platform)\n\n");
+    printf("  --sdk <version>        Set SDK version (required with --set-platform)\n");
+    printf("  --to-dylib             Convert MH_EXECUTE to MH_DYLIB (for dlopen() support)\n\n");
     printf("Example: %s foo.app/foo --set-cpu arm64 --set-platform ios-simulator --minos 14.0 --sdk 15.0\n", basename((char *)prog_name));
 }
 
@@ -582,6 +687,7 @@ int main(int argc, char *argv[]) {
         {"minos", required_argument, 0, 'm'},
         {"sdk", required_argument, 0, 's'},
         {"output", required_argument, 0, 'o'},
+        {"to-dylib", no_argument, 0, 0x1000},
         {0, 0, 0, 0}
     };
 
@@ -614,6 +720,9 @@ int main(int argc, char *argv[]) {
             break;
         case 'o':
             config.output_path = optarg;
+            break;
+        case 0x1000:
+            config.convert_to_dylib = true;
             break;
         default:
             abort();
