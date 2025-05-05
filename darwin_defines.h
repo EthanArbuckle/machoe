@@ -55,6 +55,13 @@ struct dylib_command {
     struct dylib dylib;
 };
 
+struct entry_point_command {
+    uint32_t cmd;
+    uint32_t cmdsize;
+    uint64_t entryoff;
+    uint64_t stacksize;
+};
+
 #define CPU_ARCH_MASK 0xff000000
 #define CPU_ARCH_ABI64 0x01000000
 #define CPU_TYPE_ARM ((cpu_type_t) 12)
