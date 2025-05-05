@@ -22,11 +22,11 @@ jobs:
     - name: Run tests
       run: make test
     
-    - name: Run valgrind check (Linux only)
+    - name: Run valgrind check (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
         sudo apt-get install -y valgrind
-        $(CC) $(CFLAGS) tests/unit_tests.c -o tests/test_runner
+        gcc -Wall -O2 tests/unit_tests.c -o tests/test_runner
         valgrind --leak-check=full --error-exitcode=1 ./tests/test_runner
         rm tests/test_runner
