@@ -118,7 +118,12 @@ static void transform_executable_to_dylib(void *mapped, size_t filesize, const c
     patch_pagezero(commands, header->ncmds);
 
     char dylib_name[256];
-    snprintf(dylib_name, sizeof(dylib_name), "@rpath/%s.dylib", basename);
+    if (strstr(basename, ".dylib") == NULL) {
+        snprintf(dylib_name, sizeof(dylib_name), "@rpath/%s.dylib", basename);
+    }
+    else {
+        snprintf(dylib_name, sizeof(dylib_name), "@rpath/%s", basename);
+    }
 
     if (!add_lc_id_dylib(commands, &header->ncmds, &header->sizeofcmds, maxcmdsize, dylib_name)) {
         printf("Not enough room to add LC_ID_DYLIB\n");
@@ -606,7 +611,7 @@ bool process_file(const char *filepath, const tool_config_t *config) {
         return false;
     }
 
-    if (success && (config->modify_cpu || config->modify_platform)) {
+    if (success && (config->modify_cpu || config->modify_platform || config->convert_to_dylib)) {
         printf("Wrote new binary to %s\n", filepath);
     }
     else {
@@ -745,8 +750,8 @@ int main(int argc, char *argv[]) {
     }
     config.input_path = argv[optind];
 
-    if (!config.modify_cpu && !config.modify_platform) {
-        printf("No action specified. Use --set-cpu and/or --set-platform\n");
+    if (!config.modify_cpu && !config.modify_platform && !config.convert_to_dylib) {
+        printf("No action specified. Use --set-cpu, --set-platform, or --to-dylib\n");
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
