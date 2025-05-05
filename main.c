@@ -111,7 +111,10 @@ static void transform_executable_to_dylib(void *mapped, size_t filesize, const c
     header->filetype = MH_DYLIB;
     header->flags &= ~MH_PIE;
 
-    remove_lc_main(commands, header->ncmds, &header->sizeofcmds);
+    if (remove_lc_main(commands, header->ncmds, &header->sizeofcmds)) {
+        header->ncmds--;
+    }
+
     patch_pagezero(commands, header->ncmds);
 
     char dylib_name[256];
@@ -210,6 +213,10 @@ const char *platform_id_to_name(uint32_t id) {
 }
 
 bool subtype_name_to_id(const char *name, cpu_subtype_t *id_out) {
+    if (name == NULL || id_out == NULL) {
+        return false;
+    }
+
     if (strcasecmp(name, "arm64") == 0) {
         *id_out = CPU_SUBTYPE_ARM64_ALL;
         return true;
@@ -666,6 +673,8 @@ void print_usage(const char *prog_name) {
     printf("Example: %s foo.app/foo --set-cpu arm64 --set-platform ios-simulator --minos 14.0 --sdk 15.0\n", basename((char *)prog_name));
 }
 
+#ifndef TESTS_RUNNING
+
 int main(int argc, char *argv[]) {
     tool_config_t config = {0};
     config.recursive = false;
@@ -806,3 +815,5 @@ int main(int argc, char *argv[]) {
 
     return EXIT_SUCCESS;
 }
+
+#endif // TESTS_RUNNING
