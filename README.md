@@ -16,6 +16,7 @@ Options:
   --minos <version>      Set min OS version (required with --set-platform)
   --sdk <version>        Set SDK version (required with --set-platform)
   --to-dylib             Convert MH_EXECUTE to MH_DYLIB (for dlopen() support)
+  --normalize-frameworks Update /System/Library/Frameworks paths for target platform
 
 Example: machoe foo.app/foo --set-cpu arm64 --set-platform ios-simulator --minos 14.0 --sdk 15.0
 ```

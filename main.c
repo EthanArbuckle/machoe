@@ -45,8 +45,146 @@ typedef struct {
     uint32_t target_sdk;
     bool verbose;
     bool convert_to_dylib;
+    bool normalize_frameworks;
 } tool_config_t;
 
+
+static bool perform_framework_normalization(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds_ptr, size_t max_sizeofcmds, uint32_t final_target_platform, bool verbose) {
+    uint32_t original_sizeofcmds = *sizeofcmds_ptr;
+    uint8_t *new_commands_buffer = malloc(max_sizeofcmds);
+    if (new_commands_buffer == NULL) {
+        printf("Error: Failed to allocate buffer for framework normalization\n");
+        return false;
+    }
+
+    uint8_t *read_ptr = commands;
+    uint8_t *write_ptr = new_commands_buffer;
+    uint32_t current_new_size = 0;
+    bool changed = false;
+
+    const char *sys_framework_prefix = "/System/Library/Frameworks/";
+    const size_t sys_framework_prefix_len = strlen(sys_framework_prefix);
+    const char *versions_a = "Versions/A/";
+    const size_t versions_a_len = strlen(versions_a);
+
+    bool target_is_macos = final_target_platform == PLATFORM_MACOS;
+
+    for (uint32_t i = 0; i < ncmds; ++i) {
+        struct load_command *lc = (struct load_command *)read_ptr;
+
+        if ((uintptr_t)read_ptr + sizeof(struct load_command) > (uintptr_t)commands + original_sizeofcmds) {
+            printf("Error: Command %u header extends beyond sizeofcmds during normalization\n", i);
+            free(new_commands_buffer);
+            return false;
+        }
+
+        if (lc->cmdsize == 0 || (uintptr_t)read_ptr + lc->cmdsize > (uintptr_t)commands + original_sizeofcmds) {
+            printf("Error: Command %u (cmd 0x%x) has invalid cmdsize %u during normalization\n", i, lc->cmd, lc->cmdsize);
+            free(new_commands_buffer);
+            return false;
+        }
+
+        bool copy_original = true;
+        char new_path[PATH_MAX];
+        uint32_t new_cmdsize = lc->cmdsize;
+
+        if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB || lc->cmd == LC_REEXPORT_DYLIB) {
+            struct dylib_command *dylib_cmd = (struct dylib_command *)lc;
+            if (dylib_cmd->dylib.name.offset >= lc->cmdsize) {
+                printf("Warning: Command %u (cmd 0x%x) has invalid dylib offset %u >= cmdsize %u. Skipping normalization for this command\n", i, lc->cmd, dylib_cmd->dylib.name.offset, lc->cmdsize);
+            }
+            else {
+                const char *original_path = (const char *)lc + dylib_cmd->dylib.name.offset;
+                size_t original_path_len = strnlen(original_path, lc->cmdsize - dylib_cmd->dylib.name.offset);
+                if (original_path_len >= lc->cmdsize - dylib_cmd->dylib.name.offset) {
+                    printf("Warning: Path string for command %u (cmd 0x%x) potentially not null-terminated within cmdsize. Skipping normalization\n", i, lc->cmd);
+                }
+                else if (strncmp(original_path, sys_framework_prefix, sys_framework_prefix_len) == 0) {
+                    const char *framework_part = original_path + sys_framework_prefix_len;
+                    const char *framework_suffix = strstr(framework_part, ".framework/");
+
+                    if (framework_suffix) {
+                        size_t framework_name_len = framework_suffix - framework_part + strlen(".framework");
+                        const char *binary_name_part = framework_suffix + strlen(".framework/");
+
+                        const char *current_binary_name = binary_name_part;
+                        bool has_versions_a = false;
+                        if (strncmp(binary_name_part, versions_a, versions_a_len) == 0) {
+                            current_binary_name = binary_name_part + versions_a_len;
+                            has_versions_a = true;
+                        }
+
+                        if (target_is_macos && !has_versions_a) {
+                            snprintf(new_path, PATH_MAX, "%.*s/Versions/A/%s", (int)(sys_framework_prefix_len + framework_name_len), original_path, current_binary_name);
+                            copy_original = false;
+                            if (verbose) {
+                                printf("Normalizing fw path (add): %s -> %s\n", original_path, new_path);
+                            }
+                        }
+                        else if (!target_is_macos && has_versions_a) {
+                            snprintf(new_path, PATH_MAX, "%.*s/%s", (int)(sys_framework_prefix_len + framework_name_len), original_path, current_binary_name);
+                            copy_original = false;
+                            if (verbose) {
+                                printf("Normalizing fw path (rem): %s -> %s\n", original_path, new_path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!copy_original) {
+            size_t new_path_len = strlen(new_path) + 1;
+            new_cmdsize = (uint32_t)((sizeof(struct dylib_command) + new_path_len + 7) & ~7);
+            if (current_new_size + new_cmdsize > max_sizeofcmds) {
+                printf("Error: Normalizing framework path would exceed maximum command size. Failed path: %s\n", new_path);
+                free(new_commands_buffer);
+                return false;
+            }
+
+            struct dylib_command *new_dylib_cmd = (struct dylib_command *)write_ptr;
+            memcpy(new_dylib_cmd, lc, sizeof(struct dylib_command));
+            new_dylib_cmd->cmdsize = new_cmdsize;
+            new_dylib_cmd->dylib.name.offset = sizeof(struct dylib_command);
+
+            memcpy((uint8_t *)new_dylib_cmd + sizeof(struct dylib_command), new_path, new_path_len);
+
+            size_t used_size = sizeof(struct dylib_command) + new_path_len;
+            if (new_cmdsize > used_size) {
+                memset((uint8_t *)new_dylib_cmd + used_size, 0, new_cmdsize - used_size);
+            }
+
+            write_ptr += new_cmdsize;
+            current_new_size += new_cmdsize;
+            changed = true;
+        }
+        else {
+            if (current_new_size + lc->cmdsize > max_sizeofcmds) {
+                printf("Error: Copying original command %u exceeds maximum command size during normalization\n", i);
+                free(new_commands_buffer);
+                return false;
+            }
+
+            memcpy(write_ptr, read_ptr, lc->cmdsize);
+            write_ptr += lc->cmdsize;
+            current_new_size += lc->cmdsize;
+        }
+
+        read_ptr += lc->cmdsize;
+    }
+
+    if (changed) {
+        if (verbose) {
+            printf("Framework paths normalized. Old size: %u, New size: %u\n", original_sizeofcmds, current_new_size);
+        }
+
+        memcpy(commands, new_commands_buffer, current_new_size);
+        *sizeofcmds_ptr = current_new_size;
+    }
+
+    free(new_commands_buffer);
+    return true;
+}
 
 static bool remove_lc_main(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds) {
     uint8_t *p = commands;
@@ -280,29 +418,136 @@ bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_size, cons
     }
 
     bool modified = false;
+    bool header_needs_update = false;
+    uint32_t original_platform = 0;
+    uint32_t final_target_platform = 0;
+    bool need_original_platform = config->normalize_frameworks && !config->modify_platform;
+
+    uint8_t *commands_buffer = NULL;
+    size_t commands_buffer_alloc_size = 0;
+    bool read_commands_needed = config->modify_platform || config->normalize_frameworks || config->convert_to_dylib;
+    if (read_commands_needed) {
+        commands_buffer_alloc_size = header.sizeofcmds + 512;
+        if (commands_buffer_alloc_size > slice_size - sizeof(header)) {
+            commands_buffer_alloc_size = slice_size - sizeof(header);
+        }
+
+        if (header.sizeofcmds > commands_buffer_alloc_size) {
+            printf("Error: sizeofcmds (%u) exceeds calculated max command buffer size (%zu)\n", header.sizeofcmds, commands_buffer_alloc_size);
+            return false;
+        }
+
+        commands_buffer = malloc(commands_buffer_alloc_size);
+        if (commands_buffer == NULL) {
+            printf("Failed to allocate memory for load commands buffer\n");
+            return false;
+        }
+
+        off_t commands_offset = slice_offset + sizeof(struct mach_header_64);
+        if (fseeko(file, commands_offset, SEEK_SET) != 0) {
+            printf("Failed to seek to load commands at offset %lld: %s\n", (long long)commands_offset, strerror(errno));
+            free(commands_buffer);
+            return false;
+        }
+
+        if (fread(commands_buffer, header.sizeofcmds, 1, file) != 1) {
+            printf("Failed to read load commands (size %u) at offset %lld\n", header.sizeofcmds, (long long)commands_offset);
+            free(commands_buffer);
+            return false;
+        }
+
+        if (need_original_platform) {
+            uint8_t *p = commands_buffer;
+            for (uint32_t i = 0; i < header.ncmds; ++i) {
+                struct load_command *lc = (struct load_command *)p;
+                if (lc->cmd == LC_BUILD_VERSION) {
+                    if (lc->cmdsize >= sizeof(struct build_version_command)) {
+                        struct build_version_command *bvc = (struct build_version_command *)lc;
+                        original_platform = bvc->platform;
+                    }
+                    else {
+                        printf("Warning: Found LC_BUILD_VERSION with invalid size (%u), cannot determine original platform reliably\n", lc->cmdsize);
+                    }
+
+                    break;
+                }
+                
+                if (lc->cmdsize == 0 || p + lc->cmdsize > commands_buffer + header.sizeofcmds) {
+                    break;
+                }
+
+                p += lc->cmdsize;
+            }
+
+            if (original_platform == 0) {
+                printf("Warning: Could not find LC_BUILD_VERSION to determine original platform for normalization\n");
+                need_original_platform = false;
+            }
+        }
+    }
+
+    if (config->modify_platform) {
+        final_target_platform = config->target_platform;
+    }
+    else if (config->normalize_frameworks && original_platform != 0) {
+        final_target_platform = original_platform;
+    }
+    else {
+        final_target_platform = original_platform;
+    }
 
     if (config->convert_to_dylib && header.filetype == MH_EXECUTE) {
         int fd = fileno(file);
         void *mapped = mmap(NULL, slice_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, slice_offset);
         if (mapped == MAP_FAILED) {
-            printf("Failed to mmap slice at offset %lld\n", slice_offset);
+            printf("Failed to mmap slice at offset %lld for dylib conversion: %s\n", (long long)slice_offset, strerror(errno));
+            if (commands_buffer) {
+                free(commands_buffer);
+            }
+
             return false;
         }
 
         const char *base = basename((char *)config->input_path);
         transform_executable_to_dylib(mapped, slice_size, base);
-        msync(mapped, slice_size, MS_SYNC);
+        if (msync(mapped, slice_size, MS_SYNC) == -1) {
+            printf("Warning: msync failed after dylib conversion: %s\n", strerror(errno));
+        }
 
         munmap(mapped, slice_size);
         modified = true;
+        header_needs_update = true;
 
         if (config->verbose) {
-            printf("Converted slice at offset %lld to MH_DYLIB\n", slice_offset);
+            printf("Converted slice at offset %lld to MH_DYLIB\n", (long long)slice_offset);
         }
 
         if (fseeko(file, slice_offset, SEEK_SET) != 0 || fread(&header, sizeof(header), 1, file) != 1) {
             printf("Failed to reread header after dylib transform\n");
+            if (commands_buffer) {
+                free(commands_buffer);
+            }
+
             return false;
+        }
+
+        if (commands_buffer) {
+            off_t commands_offset = slice_offset + sizeof(struct mach_header_64);
+            if (fseeko(file, commands_offset, SEEK_SET) != 0) {
+                free(commands_buffer);
+                return false;
+            }
+
+            if (header.sizeofcmds > commands_buffer_alloc_size) {
+                printf("Error: sizeofcmds (%u) after dylib conversion exceeds allocated buffer (%zu)\n", header.sizeofcmds, commands_buffer_alloc_size);
+                free(commands_buffer);
+                return false;
+            }
+
+            if (fread(commands_buffer, header.sizeofcmds, 1, file) != 1) {
+                free(commands_buffer);
+                return false;
+            }
         }
     }
 
@@ -313,140 +558,139 @@ bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_size, cons
 
         if (current_base_subtype != target_base_subtype) {
             if (config->verbose) {
-                printf("Slice at offset %lld: Changing CPU subtype from %s (0x%x) to %s (0x%x)\n", slice_offset, subtype_id_to_name(current_subtype), current_subtype, subtype_id_to_name(config->target_subtype), config->target_subtype);
+                printf("Slice at offset %lld: Changing CPU subtype from %s (0x%x) to %s (0x%x)\n", (long long)slice_offset, subtype_id_to_name(current_subtype), current_subtype, subtype_id_to_name(config->target_subtype), config->target_subtype);
             }
 
             header.cpusubtype = config->target_subtype | (current_subtype & CPU_SUBTYPE_LIB64);
             modified = true;
+            header_needs_update = true;
         }
     }
 
     if (config->modify_platform) {
-        uint32_t original_sizeofcmds = header.sizeofcmds;
         bool build_version_found = false;
+        uint8_t *p = commands_buffer;
 
-        uint32_t cmd_offset = (uint32_t)slice_offset + sizeof(struct mach_header_64);
-        for (uint32_t i = 0; i < header.ncmds; i++) {
-            struct load_command lc;
-            if (fseeko(file, cmd_offset, SEEK_SET) != 0) {
-                printf("Failed to seek to load command %u at offset %u: %s\n", i, cmd_offset, strerror(errno));
+        for (uint32_t i = 0; i < header.ncmds; ++i) {
+            struct load_command *lc = (struct load_command *)p;
+            if (!lc || lc->cmdsize == 0 || p + lc->cmdsize > commands_buffer + header.sizeofcmds) {
+                printf("Error: Invalid load command structure encountered during platform modification\n");
+                free(commands_buffer);
                 return false;
             }
 
-            if (fread(&lc, sizeof(struct load_command), 1, file) != 1) {
-                printf("Failed to read load command %u at offset %u\n", i, cmd_offset);
-                return false;
-            }
-
-            if (lc.cmdsize < sizeof(struct load_command) || lc.cmdsize == 0 || cmd_offset + lc.cmdsize > slice_offset + slice_size) {
-                printf("Invalid cmdsize %u for command %u (cmd 0x%x) at offset %u\n", lc.cmdsize, i, lc.cmd, cmd_offset);
-                return false;
-            }
-
-            if (lc.cmd == LC_BUILD_VERSION) {
-                if (lc.cmdsize < sizeof(struct build_version_command)) {
-                    printf("LC_BUILD_VERSION command too small at offset %u (size: %u, expected: %zu)\n",
-                           cmd_offset, lc.cmdsize, sizeof(struct build_version_command));
-                    return false;
-                }
-                
-                if (fseeko(file, cmd_offset, SEEK_SET) != 0) {
-                    printf("Failed to re-seek to LC_BUILD_VERSION at %u: %s\n", cmd_offset, strerror(errno));
-                    return false;
+            if (lc->cmd == LC_BUILD_VERSION) {
+                if (lc->cmdsize < sizeof(struct build_version_command)) {
+                    printf("Warning: LC_BUILD_VERSION command too small at index %u (size: %u). Skipping modification\n", i, lc->cmdsize);
+                    build_version_found = true;
+                    break;
                 }
 
-                struct build_version_command bvc;
-                if (fread(&bvc, sizeof(struct build_version_command), 1, file) != 1) {
-                    printf("Failed to read LC_BUILD_VERSION command at offset %u\n", cmd_offset);
-                    return false;
-                }
-
-                if (bvc.platform != config->target_platform || bvc.minos != config->target_minos || bvc.sdk != config->target_sdk) {
+                struct build_version_command *bvc = (struct build_version_command *)lc;
+                if (bvc->platform != config->target_platform || bvc->minos != config->target_minos || bvc->sdk != config->target_sdk) {
                     if (config->verbose) {
-                        printf("Slice at offset %lld: Modifying LC_BUILD_VERSION: platform %s (0x%x) -> %s (0x%x), minos 0x%x -> 0x%x, sdk 0x%x -> 0x%x\n", slice_offset, platform_id_to_name(bvc.platform), bvc.platform, platform_id_to_name(config->target_platform), config->target_platform, bvc.minos, config->target_minos, bvc.sdk, config->target_sdk);
+                        printf("Slice at offset %lld: Modifying LC_BUILD_VERSION: platform %s (0x%x) -> %s (0x%x), minos 0x%x -> 0x%x, sdk 0x%x -> 0x%x\n", (long long)slice_offset, platform_id_to_name(bvc->platform), bvc->platform, platform_id_to_name(config->target_platform), config->target_platform, bvc->minos, config->target_minos, bvc->sdk, config->target_sdk);
                     }
 
-                    bvc.platform = config->target_platform;
-                    bvc.minos = config->target_minos;
-                    bvc.sdk = config->target_sdk;
-
-                    if (fseeko(file, cmd_offset, SEEK_SET) != 0) {
-                        printf("Failed to seek back to write LC_BUILD_VERSION at %u: %s\n", cmd_offset, strerror(errno));
-                        return false;
-                    }
-
-                    if (fwrite(&bvc, sizeof(bvc), 1, file) != 1) {
-                        printf("Failed to write modified LC_BUILD_VERSION at offset %u\n", cmd_offset);
-                        return false;
-                    }
-
+                    bvc->platform = config->target_platform;
+                    bvc->minos = config->target_minos;
+                    bvc->sdk = config->target_sdk;
                     modified = true;
                 }
 
                 build_version_found = true;
                 break;
             }
-
-            cmd_offset += lc.cmdsize;
+            p += lc->cmdsize;
         }
 
         if (!build_version_found) {
-            uint32_t end_of_cmds_offset = (uint32_t)slice_offset + sizeof(struct mach_header_64) + original_sizeofcmds;
-            if (end_of_cmds_offset + sizeof(struct build_version_command) > slice_offset + slice_size) {
-                printf("Slice at offset %lld: Not enough space to add LC_BUILD_VERSION command\n", slice_offset);
+            uint32_t end_of_cmds_offset_in_buffer = header.sizeofcmds;
+            uint32_t new_cmd_size = sizeof(struct build_version_command);
+            if (end_of_cmds_offset_in_buffer + new_cmd_size > commands_buffer_alloc_size) {
+                printf("Slice at offset %lld: Not enough space in command buffer to add LC_BUILD_VERSION command\n", (long long)slice_offset);
+                free(commands_buffer);
                 return false;
             }
 
             if (config->verbose) {
-                printf("Slice at offset %lld: LC_BUILD_VERSION not found. Adding new command: platform %s (0x%x), minos 0x%x, sdk 0x%x\n", slice_offset, platform_id_to_name(config->target_platform), config->target_platform, config->target_minos, config->target_sdk);
+                printf("Slice at offset %lld: LC_BUILD_VERSION not found. Adding new command: platform %s (0x%x), minos 0x%x, sdk 0x%x\n", (long long)slice_offset, platform_id_to_name(config->target_platform), config->target_platform, config->target_minos, config->target_sdk);
             }
 
-            struct build_version_command new_bvc = {
-                .cmd = LC_BUILD_VERSION,
-                .cmdsize = sizeof(struct build_version_command),
-                .platform = config->target_platform,
-                .minos = config->target_minos,
-                .sdk = config->target_sdk,
-                .ntools = 0};
-
-            if (fseeko(file, end_of_cmds_offset, SEEK_SET) != 0) {
-                printf("Failed to seek to end of load commands (%u) to add LC_BUILD_VERSION: %s\n", end_of_cmds_offset, strerror(errno));
-                return false;
-            }
-
-            if (fwrite(&new_bvc, sizeof(new_bvc), 1, file) != 1) {
-                printf("Failed to write new LC_BUILD_VERSION at offset %u\n", end_of_cmds_offset);
-                return false;
-            }
+            struct build_version_command *new_bvc = (struct build_version_command *)(commands_buffer + end_of_cmds_offset_in_buffer);
+            new_bvc->cmd = LC_BUILD_VERSION;
+            new_bvc->cmdsize = new_cmd_size;
+            new_bvc->platform = config->target_platform;
+            new_bvc->minos = config->target_minos;
+            new_bvc->sdk = config->target_sdk;
+            new_bvc->ntools = 0;
 
             header.ncmds++;
-            header.sizeofcmds += sizeof(new_bvc);
+            header.sizeofcmds += new_cmd_size;
             modified = true;
+            header_needs_update = true;
         }
     }
 
-    if (modified) {
+    if (commands_buffer && (config->normalize_frameworks || config->modify_platform)) {
+        uint32_t sizeofcmds_before_norm = header.sizeofcmds;
+        size_t max_lc_size = commands_buffer_alloc_size;
+
+        if (perform_framework_normalization(commands_buffer, header.ncmds, &header.sizeofcmds, max_lc_size, final_target_platform, config->verbose)) {
+            if (header.sizeofcmds != sizeofcmds_before_norm) {
+                modified = true;
+                header_needs_update = true;
+            }
+        }
+        else {
+            printf("Framework normalization failed for slice at offset %lld\n", (long long)slice_offset);
+            free(commands_buffer);
+            return false;
+        }
+    }
+
+    if (commands_buffer && modified) {
+        off_t commands_offset = slice_offset + sizeof(struct mach_header_64);
+        if (fseeko(file, commands_offset, SEEK_SET) != 0) {
+            printf("Failed to seek to command offset %lld for writing: %s\n", (long long)commands_offset, strerror(errno));
+            free(commands_buffer);
+            return false;
+        }
+
+        if (fwrite(commands_buffer, header.sizeofcmds, 1, file) != 1) {
+            printf("Failed to write modified load commands (size %u) at offset %lld\n", header.sizeofcmds, (long long)commands_offset);
+            free(commands_buffer);
+            return false;
+        }
+    }
+
+    if (commands_buffer) {
+        free(commands_buffer);
+        commands_buffer = NULL;
+    }
+
+    if (header_needs_update) {
         if (fseeko(file, slice_offset, SEEK_SET) != 0) {
-            printf("Failed to seek to slice start (%lld) to write updated header: %s\n", slice_offset, strerror(errno));
+            printf("Failed to seek to slice start (%lld) to write updated header: %s\n", (long long)slice_offset, strerror(errno));
             return false;
         }
-        
+
         if (fwrite(&header, sizeof(header), 1, file) != 1) {
-            printf("Failed to write updated mach_header_64 at offset %lld\n", slice_offset);
+            printf("Failed to write updated mach_header_64 at offset %lld\n", (long long)slice_offset);
             return false;
         }
-        
+
         if (config->verbose) {
-            printf("Slice at offset %lld: Header updated successfully\n", slice_offset);
+            printf("Slice at offset %lld: Header updated successfully (ncmds=%u, sizeofcmds=%u, subtype=0x%x)\n", (long long)slice_offset, header.ncmds, header.sizeofcmds, header.cpusubtype);
         }
     }
-    else {
-        if (config->verbose) {
-            printf("Slice at offset %lld: No changes made to header\n", slice_offset);
-        }
+    else if (modified && config->verbose) {
+        printf("Slice at offset %lld: Load command content updated\n", (long long)slice_offset);
     }
+
     return true;
 }
+
 
 bool process_single_macho(FILE *file, const char *filepath, uint32_t magic, struct stat *st, const tool_config_t *config) {
     if (magic == MH_CIGAM_64) {
@@ -672,12 +916,14 @@ void print_usage(const char *prog_name) {
     printf("  -h, --help             Show help\n");
     printf("  -r, --recursive        Process directories recursively\n");
     printf("  -v, --verbose          Show detailed output\n\n");
+    printf("Modification Options:\n");
     printf("  --set-cpu <type>       Set ARM64 CPU subtype (arm64, arm64e)\n");
     printf("  --set-platform <name>  Set platform (ios, macos, ios-simulator, etc)\n");
     printf("  --minos <version>      Set min OS version (required with --set-platform)\n");
     printf("  --sdk <version>        Set SDK version (required with --set-platform)\n");
+    printf("  --normalize-frameworks Update /System/Library/Frameworks paths for target platform\n");
     printf("  --to-dylib             Convert MH_EXECUTE to MH_DYLIB (for dlopen() support)\n\n");
-    printf("Example: %s foo.app/foo --set-cpu arm64 --set-platform ios-simulator --minos 14.0 --sdk 15.0\n", basename((char *)prog_name));
+    printf("Example: %s foo.bin --set-platform macos --minos 11.0 --sdk 12.0 --normalize-frameworks\n", basename((char *)prog_name));
 }
 
 #ifndef TESTS_RUNNING
@@ -688,6 +934,8 @@ int main(int argc, char *argv[]) {
     config.modify_cpu = false;
     config.modify_platform = false;
     config.verbose = false;
+    config.normalize_frameworks = false;
+    config.convert_to_dylib = false;
 
     const char *set_cpu_str = NULL;
     const char *set_platform_str = NULL;
@@ -704,6 +952,7 @@ int main(int argc, char *argv[]) {
         {"sdk", required_argument, 0, 's'},
         {"output", required_argument, 0, 'o'},
         {"to-dylib", no_argument, 0, 0x1000},
+        {"normalize-frameworks", no_argument, 0, 0x1001},
         {0, 0, 0, 0}
     };
 
@@ -711,37 +960,49 @@ int main(int argc, char *argv[]) {
     int option_index = 0;
     while ((opt = getopt_long(argc, argv, "hrvc:p:m:s:o:", long_options, &option_index)) != -1) {
         switch (opt) {
-        case 'h':
-            print_usage(argv[0]);
-            return EXIT_SUCCESS;
-        case 'r':
-            config.recursive = true;
-            break;
-        case 'v':
-            config.verbose = true;
-            break;
-        case 'c':
-            config.modify_cpu = true;
-            set_cpu_str = optarg;
-            break;
-        case 'p':
-            config.modify_platform = true;
-            set_platform_str = optarg;
-            break;
-        case 'm':
-            minos_str = optarg;
-            break;
-        case 's':
-            sdk_str = optarg;
-            break;
-        case 'o':
-            config.output_path = optarg;
-            break;
-        case 0x1000:
-            config.convert_to_dylib = true;
-            break;
-        default:
-            abort();
+            case 'h':
+                print_usage(argv[0]);
+                return EXIT_SUCCESS;
+            case 'r':
+                config.recursive = true;
+                break;
+            case 'v':
+                config.verbose = true;
+                break;
+            case 'c':
+                config.modify_cpu = true;
+                set_cpu_str = optarg;
+                break;
+            case 'p':
+                config.modify_platform = true;
+                set_platform_str = optarg;
+                break;
+            case 'm':
+                minos_str = optarg;
+                break;
+            case 's':
+                sdk_str = optarg;
+                break;
+            case 'o':
+                config.output_path = optarg;
+                break;
+            case 0x1000:
+                config.convert_to_dylib = true;
+                break;
+            case 0x1001:
+                config.normalize_frameworks = true;
+                break;
+            default: {
+                if (opt == '?') {
+                    printf("Invalid option or missing argument\n");
+                }
+                else {
+                    printf("Unknown option character `\\x%x'\n", optopt);
+                }
+
+                print_usage(argv[0]);
+                return EXIT_FAILURE;
+            }
         }
     }
 
@@ -752,8 +1013,8 @@ int main(int argc, char *argv[]) {
     }
     config.input_path = argv[optind];
 
-    if (!config.modify_cpu && !config.modify_platform && !config.convert_to_dylib) {
-        printf("No action specified. Use --set-cpu, --set-platform, or --to-dylib\n");
+    if (!config.modify_cpu && !config.modify_platform && !config.normalize_frameworks && !config.convert_to_dylib) {
+        printf("No action specified. Use --set-cpu, --set-platform, --normalize-frameworks, or --to-dylib\n");
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }

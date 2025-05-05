@@ -90,6 +90,9 @@ struct build_version_command {
 #define LC_SEGMENT_64 0x19
 #define LC_ID_DYLIB 0xd
 #define LC_BUILD_VERSION 0x32
+#define LC_REEXPORT_DYLIB (0x1f | LC_REQ_DYLD)
+#define LC_LOAD_WEAK_DYLIB (0x18 | LC_REQ_DYLD)
+#define LC_LOAD_DYLIB 0xc
 
 #define MH_EXECUTE 0x2
 #define MH_DYLIB 0x6
@@ -104,7 +107,6 @@ struct build_version_command {
 #define PLATFORM_IOSSIMULATOR 7
 #define PLATFORM_TVOSSIMULATOR 8
 #define PLATFORM_WATCHOSSIMULATOR 9
-
 
 struct fat_header {
     uint32_t magic;
