@@ -182,7 +182,7 @@ void test_patch_pagezero() {
 
     assert(strcmp(seg_pagezero->segname, "__dylibolical") == 0);
     assert(seg_pagezero->vmsize == 0x4000);
-    assert(seg_pagezero->vmaddr == original_vmaddr - 0x4000);
+    assert(seg_pagezero->vmaddr == 0);
 
     // Case 2: __PAGEZERO does not exist
     memset(buffer, 0, sizeof(buffer));

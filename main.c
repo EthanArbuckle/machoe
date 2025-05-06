@@ -212,7 +212,7 @@ static void patch_pagezero(uint8_t *commands, uint32_t ncmds) {
             if (strcmp(seg->segname, "__PAGEZERO") == 0) {
                 strncpy(seg->segname, "__dylibolical", sizeof(seg->segname));
                 seg->vmsize = 0x4000;
-                seg->vmaddr -= 0x4000;
+                seg->vmaddr = 0;
             }
         }
 
