@@ -702,25 +702,23 @@ bool process_single_macho(FILE *file, const char *filepath, uint32_t magic, stru
     }
 }
 
-bool process_arm64_slice(FILE *file, const char *filepath, struct fat_arch *arch, bool needs_swap, size_t file_size, const tool_config_t *config) {
-    struct fat_arch arch_copy = *arch;
-    if (needs_swap) {
-        arch_copy.cputype = OSSwapInt32(arch_copy.cputype);
-        arch_copy.cpusubtype = OSSwapInt32(arch_copy.cpusubtype);
-        arch_copy.offset = OSSwapInt32(arch_copy.offset);
-        arch_copy.size = OSSwapInt32(arch_copy.size);
-    }
+bool process_arm64_slice(FILE *file, const char *filepath, struct fat_arch *arch_host_order, bool needs_swap_for_write_operations, size_t file_size, const tool_config_t *config) {
+
+    uint32_t slice_cputype = arch_host_order->cputype;
+    uint32_t slice_cpusubtype = arch_host_order->cpusubtype;
+    uint32_t slice_offset = arch_host_order->offset;
+    uint32_t slice_size = arch_host_order->size;
 
     if (config->verbose) {
-        printf("ARM64 slice (subtype 0x%x) at offset %u, size %u\n", arch_copy.cpusubtype, arch_copy.offset, arch_copy.size);
+        printf("ARM64 slice (subtype 0x%x) at offset %u, size %u\n", slice_cpusubtype, slice_offset, slice_size);
     }
 
-    if (arch_copy.offset == 0 || arch_copy.offset + arch_copy.size > file_size || arch_copy.size < sizeof(struct mach_header_64)) {
-        printf("Invalid offset/size for fat arch %u in %s. Skipping slice\n", arch_copy.offset, filepath);
+    if (slice_offset == 0 || slice_offset + slice_size > file_size || slice_size < sizeof(struct mach_header_64)) {
+        printf("Invalid offset/size for fat arch (offset %u, size %u, file_size %zu) in %s. Skipping slice\n", slice_offset, slice_size, file_size, filepath);
         return false;
     }
 
-    return process_macho_slice(file, (off_t)arch_copy.offset, (size_t)arch_copy.size, config);
+    return process_macho_slice(file, (off_t)arch_host_order->offset, (size_t)arch_host_order->size, config);
 }
 
 bool update_fat_arch_subtype(FILE *file, const char *filepath, uint32_t i, cpu_subtype_t current_subtype, cpu_subtype_t target_subtype, bool needs_swap, const tool_config_t *config) {
@@ -751,12 +749,13 @@ bool update_fat_arch_subtype(FILE *file, const char *filepath, uint32_t i, cpu_s
 }
 
 bool process_fat_file(FILE *file, const char *filepath, bool needs_swap, struct stat *st, const tool_config_t *config) {
+    fseeko(file, 0, SEEK_SET);
     struct fat_header fat_header;
     if (fread(&fat_header, sizeof(fat_header), 1, file) != 1) {
         printf("Can't read fat header from %s\n", filepath);
         return false;
     }
-    
+
     uint32_t nfat_arch = fat_header.nfat_arch;
     if (needs_swap) {
         nfat_arch = OSSwapInt32(nfat_arch);
