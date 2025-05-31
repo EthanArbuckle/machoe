@@ -604,6 +604,23 @@ bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_size, cons
             p += lc->cmdsize;
         }
 
+        p = commands_buffer;
+        for (int i = 0; i < header.ncmds; ++i) {
+            struct load_command *lc = (struct load_command *)p;
+            if (lc->cmd == LC_VERSION_MIN_IPHONEOS || lc->cmd == LC_VERSION_MIN_MACOSX) {
+                if (config->verbose) {
+                    printf("Slice at offset %lld: Removing LC_VERSION_MIN command: cmd=0x%x, cmdsize=%u\n", (long long)slice_offset, lc->cmd, lc->cmdsize);
+                }
+
+                memmove(p, p + lc->cmdsize, commands_buffer + header.sizeofcmds - p - lc->cmdsize);
+                header.sizeofcmds -= lc->cmdsize;
+                header.ncmds--;
+                modified = true;
+                break;
+            }
+            p += lc->cmdsize;
+        }
+
         if (!build_version_found) {
             uint32_t end_of_cmds_offset_in_buffer = header.sizeofcmds;
             uint32_t new_cmd_size = sizeof(struct build_version_command);
@@ -703,8 +720,6 @@ bool process_single_macho(FILE *file, const char *filepath, uint32_t magic, stru
 }
 
 bool process_arm64_slice(FILE *file, const char *filepath, struct fat_arch *arch_host_order, bool needs_swap_for_write_operations, size_t file_size, const tool_config_t *config) {
-
-    uint32_t slice_cputype = arch_host_order->cputype;
     uint32_t slice_cpusubtype = arch_host_order->cpusubtype;
     uint32_t slice_offset = arch_host_order->offset;
     uint32_t slice_size = arch_host_order->size;

@@ -177,7 +177,6 @@ void test_patch_pagezero() {
     lc2->cmdsize = sizeof(struct dylib_command);
 
     ncmds = 2;
-    uint64_t original_vmaddr = seg_pagezero->vmaddr;
     patch_pagezero(buffer, ncmds);
 
     assert(strcmp(seg_pagezero->segname, "__dylibolical") == 0);
