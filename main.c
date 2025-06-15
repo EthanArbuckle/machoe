@@ -616,6 +616,7 @@ bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_size, cons
                 header.sizeofcmds -= lc->cmdsize;
                 header.ncmds--;
                 modified = true;
+                header_needs_update = true;
                 break;
             }
             p += lc->cmdsize;
