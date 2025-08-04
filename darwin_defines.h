@@ -94,6 +94,9 @@ struct build_version_command {
 #define LC_LOAD_WEAK_DYLIB (0x18 | LC_REQ_DYLD)
 #define LC_LOAD_DYLIB 0xc
 
+#define LC_VERSION_MIN_MACOSX 0x24
+#define LC_VERSION_MIN_IPHONEOS 0x25
+
 #define MH_EXECUTE 0x2
 #define MH_DYLIB 0x6
 #define MH_PIE 0x200000
