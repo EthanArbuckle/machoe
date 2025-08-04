@@ -367,7 +367,7 @@ bool subtype_name_to_id(const char *name, cpu_subtype_t *id_out) {
         return true;
     }
     else if (strcasecmp(name, "arm64e") == 0) {
-        *id_out = CPU_SUBTYPE_ARM64E;
+        *id_out = CPU_SUBTYPE_LIB64 | CPU_SUBTYPE_ARM64E;
         return true;
     }
 
@@ -376,7 +376,7 @@ bool subtype_name_to_id(const char *name, cpu_subtype_t *id_out) {
 
 const char *subtype_id_to_name(cpu_subtype_t id) {
     cpu_subtype_t base_id = id & ~CPU_SUBTYPE_MASK;
-    if (base_id == CPU_SUBTYPE_ARM64E) {
+    if (base_id == CPU_SUBTYPE_ARM64E || base_id == (CPU_SUBTYPE_LIB64 | CPU_SUBTYPE_ARM64E)) {
         return "arm64e";
     }
     else if (base_id == CPU_SUBTYPE_ARM64_ALL) {

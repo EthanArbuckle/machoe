@@ -71,7 +71,7 @@ void test_subtype_name_to_id() {
     cpu_subtype_t id;
 
     assert(subtype_name_to_id("arm64", &id) && id == CPU_SUBTYPE_ARM64_ALL);
-    assert(subtype_name_to_id("ARM64E", &id) && id == CPU_SUBTYPE_ARM64E);
+    assert(subtype_name_to_id("ARM64E", &id) && id == (CPU_SUBTYPE_ARM64E | CPU_SUBTYPE_LIB64));
     assert(!subtype_name_to_id("armv7", &id));
     assert(!subtype_name_to_id(NULL, &id));
     assert(!subtype_name_to_id("arm64", NULL));
