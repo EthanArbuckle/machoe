@@ -1,11 +1,19 @@
-CC = gcc
+SHELL := $(if $(wildcard /bin/sh),/bin/sh,$(if $(wildcard /var/jb/usr/bin/sh),/var/jb/usr/bin/sh,/usr/bin/sh))
+CC := $(if $(wildcard /usr/bin/gcc),gcc,$(if $(wildcard /var/jb/usr/bin/gcc),gcc,clang))
 CFLAGS = -Wall -O2
 LDFLAGS =
 PREFIX = /usr/local
 
 ifeq ($(shell uname), Darwin)
 	PREFIX = /opt/local
-	CFLAGS += -arch arm64
+	UNAME_M := $(shell uname -m)
+	ifneq ($(findstring iPhone,$(UNAME_M)),)
+		CFLAGS += -arch arm64
+	else ifneq ($(findstring iPad,$(UNAME_M)),)
+		CFLAGS += -arch arm64
+	else
+		CFLAGS += -arch arm64 -arch x86_64
+	endif
 	LDFLAGS +=
 else
 	PREFIX = /usr/local
