@@ -22,7 +22,7 @@ else
 endif
 
 TARGET = machoe
-SRCS = main.c
+SRCS = main.c machoe.c
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all clean install test
@@ -45,7 +45,7 @@ clean:
 
 test:
 		@echo "=== Compiling test suite ==="
-		$(CC) $(CFLAGS) tests/unit_tests.c -o tests/unit_tests
+		$(CC) $(CFLAGS) -I./ machoe.c tests/unit_tests.c -o tests/unit_tests -DTESTS_RUNNING=1
 		@echo
 		@echo "=== Running tests ==="
 		@./tests/unit_tests

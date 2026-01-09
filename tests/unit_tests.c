@@ -1,14 +1,20 @@
+#include "machoe.h"
+
 #include <assert.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define TESTS_RUNNING 1
 
-#include "../main.c"
+bool remove_lc_main(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds);
+void patch_pagezero(uint8_t *commands, uint32_t ncmds);
+bool add_lc_id_dylib(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *dylib_path);
+void transform_executable_to_dylib(void *mapped, size_t filesize, const char *basename);
+bool perform_framework_normalization(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds_ptr, size_t max_sizeofcmds, uint32_t final_target_platform, bool verbose);
 
-void print_test_header(const char* test_name) {
+
+void print_test_header(const char *test_name) {
     printf("--- Running test: %s ---\n", test_name);
 }
 
