@@ -307,7 +307,7 @@ bool platform_name_to_id(const char *name, uint32_t *id_out) {
     else {
         return false;
     }
-    
+
     return true;
 }
 
@@ -460,7 +460,7 @@ static bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_siz
 
                     break;
                 }
-                
+
                 if (lc->cmdsize == 0 || p + lc->cmdsize > commands_buffer + header.sizeofcmds) {
                     break;
                 }
@@ -743,13 +743,13 @@ static bool update_fat_arch_subtype(FILE *file, const char *filepath, uint32_t i
             printf("Failed to seek to fat_arch cpusubtype field for slice %u: %s\n", i, strerror(errno));
             return false;
         }
-        
+
         if (fwrite(&subtype_to_write, sizeof(cpu_subtype_t), 1, file) != 1) {
             printf("Failed to write updated fat_arch cpusubtype for slice %u\n", i);
             return false;
         }
     }
-    
+
     return true;
 }
 
@@ -765,30 +765,30 @@ bool process_fat_file(FILE *file, const char *filepath, bool needs_swap, struct 
     if (needs_swap) {
         nfat_arch = OSSwapInt32(nfat_arch);
     }
-    
+
     if (nfat_arch == 0 || nfat_arch > 128) {  // 128 is an arbitrary sanity limit
         printf("Invalid number of architectures in fat file: %u\n", nfat_arch);
         return false;
     }
-    
+
     size_t arch_table_size = nfat_arch * sizeof(struct fat_arch);
     if (sizeof(struct fat_header) + arch_table_size > (size_t)st->st_size) {
         printf("Fat header indicates more architectures than file size can contain\n");
         return false;
     }
-    
+
     struct fat_arch *archs = malloc(arch_table_size);
     if (archs == NULL) {
         printf("Failed to alloc memory for arch entries\n");
         return false;
     }
-    
+
     if (fread(archs, sizeof(struct fat_arch), nfat_arch, file) != nfat_arch) {
         printf("Failed to read fat arch entries from %s\n", filepath);
         free(archs);
         return false;
     }
-        
+
     bool success = true;
     for (uint32_t i = 0; i < nfat_arch; i++) {
         struct fat_arch arch = archs[i];
@@ -820,7 +820,7 @@ bool process_fat_file(FILE *file, const char *filepath, bool needs_swap, struct 
             }
         }
     }
-    
+
     free(archs);
     return success;
 }
@@ -832,7 +832,7 @@ bool process_binary(const char *filepath, const tool_config_t *config) {
         printf("Cannot open file %s: %s\n", filepath, strerror(errno));
         return false;
     }
-    
+
     struct stat st;
     if (fstat(fileno(file), &st) != 0) {
         printf("Cannot stat file %s: %s\n", filepath, strerror(errno));
@@ -846,7 +846,17 @@ bool process_binary(const char *filepath, const tool_config_t *config) {
         fclose(file);
         return false;
     }
-    
+
+    bool is_macho = (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) || (magic == FAT_MAGIC || magic == FAT_CIGAM);
+    if (!is_macho) {
+        if (config->verbose) {
+            printf("Skipping non-mach-o file: %s\n", filepath);
+        }
+
+        fclose(file);
+        return false;
+    }
+
     bool success = false;
     if (magic == MH_MAGIC_64 || magic == MH_CIGAM_64) {
         success = process_single_macho(file, filepath, magic, &st, config);
