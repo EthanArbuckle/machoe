@@ -652,7 +652,16 @@ void test_add_lc_rpath() {
 
     assert(count_rpath_value(buffer, ncmds, sizeofcmds, rpath) == 1);
 
-    /* Case 2: empty command list */
+    /* Case 2: dedupe (adding same rpath again should not grow) */
+    orig_ncmds = ncmds;
+    orig_sizeofcmds = sizeofcmds;
+
+    assert(add_lc_rpath(buffer, &ncmds, &sizeofcmds, maxcmdsize, rpath));
+    assert(ncmds == orig_ncmds);
+    assert(sizeofcmds == orig_sizeofcmds);
+    assert(count_rpath_value(buffer, ncmds, sizeofcmds, rpath) == 1);
+
+    /* Case 3: empty command list */
     memset(buffer, 0, sizeof(buffer));
     ncmds = 0;
     sizeofcmds = 0;
@@ -669,7 +678,7 @@ void test_add_lc_rpath() {
     assert(rc->cmd == LC_RPATH);
     assert(strcmp((char *)rc + sizeof(struct rpath_command), rpath2) == 0);
 
-    /* Case 3: not enough space */
+    /* Case 4: not enough space */
     memset(buffer, 0, sizeof(buffer));
     ncmds = 0;
     sizeofcmds = 0;
@@ -679,7 +688,7 @@ void test_add_lc_rpath() {
     assert(ncmds == 0);
     assert(sizeofcmds == 0);
 
-    /* Case 4: invalid args */
+    /* Case 5: invalid args */
     memset(buffer, 0, sizeof(buffer));
     ncmds = 0;
     sizeofcmds = 0;
@@ -689,7 +698,6 @@ void test_add_lc_rpath() {
 
     print_test_footer("add_lc_rpath", success);
 }
-
 
 int main(int argc, char *argv[]) {
     printf("Starting tests...\n\n");

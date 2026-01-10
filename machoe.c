@@ -232,6 +232,47 @@ EXPORT_FOR_TESTING bool add_lc_id_dylib(uint8_t *commands, uint32_t *ncmds, uint
     return true;
 }
 
+EXPORT_FOR_TESTING bool rpath_exists(uint8_t *commands, uint32_t ncmds, uint32_t sizeofcmds, const char *rpath_value) {
+    if (commands == NULL || rpath_value == NULL) {
+        return false;
+    }
+
+    uint8_t *p = commands;
+    uint8_t *end = commands + sizeofcmds;
+
+    for (uint32_t i = 0; i < ncmds; i++) {
+        if (p + sizeof(struct load_command) > end) {
+            break;
+        }
+
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmdsize == 0 || p + lc->cmdsize > end) {
+            break;
+        }
+
+        if (lc->cmd == LC_RPATH) {
+            if (lc->cmdsize >= sizeof(struct rpath_command)) {
+                struct rpath_command *rc = (struct rpath_command *)lc;
+                if (rc->path.offset < lc->cmdsize) {
+                    const char *existing = (const char *)((uint8_t *)rc + rc->path.offset);
+
+                    size_t max_len = lc->cmdsize - rc->path.offset;
+                    size_t existing_len = strnlen(existing, max_len);
+                    if (existing_len < max_len) {
+                        if (strcmp(existing, rpath_value) == 0) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        p += lc->cmdsize;
+    }
+
+    return false;
+}
+
 EXPORT_FOR_TESTING bool add_lc_rpath(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *rpath_value) {
     if (commands == NULL || ncmds == NULL || sizeofcmds == NULL || rpath_value == NULL) {
         return false;
@@ -239,6 +280,10 @@ EXPORT_FOR_TESTING bool add_lc_rpath(uint8_t *commands, uint32_t *ncmds, uint32_
 
     if (rpath_value[0] == '\0') {
         return false;
+    }
+
+    if (rpath_exists(commands, *ncmds, *sizeofcmds, rpath_value)) {
+        return true;
     }
 
     size_t path_len = strlen(rpath_value) + 1;
