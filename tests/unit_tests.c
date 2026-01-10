@@ -12,7 +12,7 @@ void patch_pagezero(uint8_t *commands, uint32_t ncmds);
 bool add_lc_id_dylib(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *dylib_path);
 void transform_executable_to_dylib(void *mapped, size_t filesize, const char *basename);
 bool perform_framework_normalization(uint8_t *commands, uint32_t ncmds, uint32_t *sizeofcmds_ptr, size_t max_sizeofcmds, uint32_t final_target_platform, bool verbose);
-
+bool add_lc_rpath(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *rpath_value);
 
 void print_test_header(const char *test_name) {
     printf("--- Running test: %s ---\n", test_name);
@@ -548,6 +548,149 @@ void test_normalize_frameworks() {
     print_test_footer("normalize_frameworks", success);
 }
 
+static uint32_t align8_u32(uint32_t v) {
+    return (v + 7U) & ~7U;
+}
+
+static struct rpath_command *find_first_rpath(uint8_t *commands, uint32_t ncmds, uint32_t sizeofcmds) {
+    uint8_t *p = commands;
+    uint8_t *end = commands + sizeofcmds;
+
+    for (uint32_t i = 0; i < ncmds; i++) {
+        if (p + sizeof(struct load_command) > end) {
+            return NULL;
+        }
+
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmdsize == 0 || p + lc->cmdsize > end) {
+            return NULL;
+        }
+
+        if (lc->cmd == LC_RPATH) {
+            if (lc->cmdsize < sizeof(struct rpath_command)) {
+                return NULL;
+            }
+
+            return (struct rpath_command *)lc;
+        }
+
+        p += lc->cmdsize;
+    }
+
+    return NULL;
+}
+
+static int count_rpath_value(uint8_t *commands, uint32_t ncmds, uint32_t sizeofcmds, const char *value) {
+    int found = 0;
+    uint8_t *p = commands;
+    uint8_t *end = commands + sizeofcmds;
+
+    for (uint32_t i = 0; i < ncmds; i++) {
+        if (p + sizeof(struct load_command) > end) {
+            break;
+        }
+
+        struct load_command *lc = (struct load_command *)p;
+        if (lc->cmdsize == 0 || p + lc->cmdsize > end) {
+            break;
+        }
+
+        if (lc->cmd == LC_RPATH) {
+            if (lc->cmdsize >= sizeof(struct rpath_command)) {
+                struct rpath_command *rc = (struct rpath_command *)lc;
+                if (rc->path.offset < lc->cmdsize) {
+                    const char *s = (const char *)((uint8_t *)rc + rc->path.offset);
+                    size_t max_len = lc->cmdsize - rc->path.offset;
+                    size_t sl = strnlen(s, max_len);
+                    if (sl < max_len) {
+                        if (strcmp(s, value) == 0) {
+                            found++;
+                        }
+                    }
+                }
+            }
+        }
+
+        p += lc->cmdsize;
+    }
+
+    return found;
+}
+
+void test_add_lc_rpath() {
+    print_test_header("add_lc_rpath");
+    bool success = true;
+
+    uint8_t buffer[512];
+    size_t maxcmdsize = sizeof(buffer);
+
+    /* Case 1: add to non-empty command list */
+    memset(buffer, 0, sizeof(buffer));
+
+    struct load_command *lc1 = (struct load_command *)buffer;
+    lc1->cmd = LC_SEGMENT_64;
+    lc1->cmdsize = sizeof(struct segment_command_64);
+
+    uint32_t ncmds = 1;
+    uint32_t sizeofcmds = lc1->cmdsize;
+
+    const char *rpath = "@executable_path/Frameworks";
+    uint32_t rpath_cmdsize = align8_u32((uint32_t)(sizeof(struct rpath_command) + strlen(rpath) + 1));
+
+    uint32_t orig_ncmds = ncmds;
+    uint32_t orig_sizeofcmds = sizeofcmds;
+
+    assert(add_lc_rpath(buffer, &ncmds, &sizeofcmds, maxcmdsize, rpath));
+    assert(ncmds == orig_ncmds + 1);
+    assert(sizeofcmds == orig_sizeofcmds + rpath_cmdsize);
+
+    struct rpath_command *rc = (struct rpath_command *)(buffer + orig_sizeofcmds);
+    assert(rc->cmd == LC_RPATH);
+    assert(rc->cmdsize == rpath_cmdsize);
+    assert(rc->path.offset == sizeof(struct rpath_command));
+    assert(strcmp((char *)rc + sizeof(struct rpath_command), rpath) == 0);
+
+    assert(count_rpath_value(buffer, ncmds, sizeofcmds, rpath) == 1);
+
+    /* Case 2: empty command list */
+    memset(buffer, 0, sizeof(buffer));
+    ncmds = 0;
+    sizeofcmds = 0;
+
+    const char *rpath2 = "@loader_path";
+    uint32_t rpath2_cmdsize = align8_u32((uint32_t)(sizeof(struct rpath_command) + strlen(rpath2) + 1));
+
+    assert(add_lc_rpath(buffer, &ncmds, &sizeofcmds, maxcmdsize, rpath2));
+    assert(ncmds == 1);
+    assert(sizeofcmds == rpath2_cmdsize);
+
+    rc = find_first_rpath(buffer, ncmds, sizeofcmds);
+    assert(rc != NULL);
+    assert(rc->cmd == LC_RPATH);
+    assert(strcmp((char *)rc + sizeof(struct rpath_command), rpath2) == 0);
+
+    /* Case 3: not enough space */
+    memset(buffer, 0, sizeof(buffer));
+    ncmds = 0;
+    sizeofcmds = 0;
+
+    size_t tiny_max = (size_t)(rpath2_cmdsize - 1);
+    assert(!add_lc_rpath(buffer, &ncmds, &sizeofcmds, tiny_max, rpath2));
+    assert(ncmds == 0);
+    assert(sizeofcmds == 0);
+
+    /* Case 4: invalid args */
+    memset(buffer, 0, sizeof(buffer));
+    ncmds = 0;
+    sizeofcmds = 0;
+
+    assert(!add_lc_rpath(buffer, &ncmds, &sizeofcmds, maxcmdsize, ""));
+    assert(!add_lc_rpath(buffer, &ncmds, &sizeofcmds, maxcmdsize, NULL));
+
+    print_test_footer("add_lc_rpath", success);
+}
+
+
 int main(int argc, char *argv[]) {
     printf("Starting tests...\n\n");
 
@@ -561,6 +704,7 @@ int main(int argc, char *argv[]) {
     test_add_lc_id_dylib();
     test_transform_executable_to_dylib();
     test_normalize_frameworks();
+    test_add_lc_rpath();
 
     printf("All tests completed\n");
     return EXIT_SUCCESS;

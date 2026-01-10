@@ -17,6 +17,7 @@ typedef struct {
     bool verbose;
     bool convert_to_dylib;
     bool normalize_frameworks;
+    const char *add_rpath;
 } tool_config_t;
 
 

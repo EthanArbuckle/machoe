@@ -232,6 +232,36 @@ EXPORT_FOR_TESTING bool add_lc_id_dylib(uint8_t *commands, uint32_t *ncmds, uint
     return true;
 }
 
+EXPORT_FOR_TESTING bool add_lc_rpath(uint8_t *commands, uint32_t *ncmds, uint32_t *sizeofcmds, size_t maxcmdsize, const char *rpath_value) {
+    if (commands == NULL || ncmds == NULL || sizeofcmds == NULL || rpath_value == NULL) {
+        return false;
+    }
+
+    if (rpath_value[0] == '\0') {
+        return false;
+    }
+
+    size_t path_len = strlen(rpath_value) + 1;
+    uint32_t padded_size = (uint32_t)((sizeof(struct rpath_command) + path_len + 7) & ~7);
+
+    if (*sizeofcmds + padded_size > maxcmdsize) {
+        return false;
+    }
+
+    struct rpath_command *rc = (struct rpath_command *)(commands + *sizeofcmds);
+    memset(rc, 0, padded_size);
+
+    rc->cmd = LC_RPATH;
+    rc->cmdsize = padded_size;
+    rc->path.offset = sizeof(struct rpath_command);
+
+    memcpy((uint8_t *)rc + sizeof(struct rpath_command), rpath_value, path_len);
+
+    *ncmds = *ncmds + 1;
+    *sizeofcmds = *sizeofcmds + padded_size;
+    return true;
+}
+
 EXPORT_FOR_TESTING void transform_executable_to_dylib(void *mapped, size_t filesize, const char *basename) {
     struct mach_header_64 *header = (struct mach_header_64 *)mapped;
     uint8_t *commands = (uint8_t *)(header + 1);
@@ -414,7 +444,7 @@ static bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_siz
 
     uint8_t *commands_buffer = NULL;
     size_t commands_buffer_alloc_size = 0;
-    bool read_commands_needed = config->modify_platform || config->normalize_frameworks || config->convert_to_dylib;
+    bool read_commands_needed = config->modify_platform || config->normalize_frameworks || config->convert_to_dylib || (config->add_rpath != NULL && config->add_rpath[0] != '\0');
     if (read_commands_needed) {
         commands_buffer_alloc_size = header.sizeofcmds + 512;
         if (commands_buffer_alloc_size > slice_size - sizeof(header)) {
@@ -656,6 +686,21 @@ static bool process_macho_slice(FILE *file, off_t slice_offset, size_t slice_siz
         }
     }
 
+    if (commands_buffer && config->add_rpath != NULL && config->add_rpath[0] != '\0') {
+        if (!add_lc_rpath(commands_buffer, &header.ncmds, &header.sizeofcmds, commands_buffer_alloc_size, config->add_rpath)) {
+            printf("Slice at offset %lld: Not enough room to add LC_RPATH (%s)\n", (long long)slice_offset, config->add_rpath);
+            free(commands_buffer);
+            return false;
+        }
+
+        modified = true;
+        header_needs_update = true;
+
+        if (config->verbose) {
+            printf("Slice at offset %lld: Added LC_RPATH: %s\n", (long long)slice_offset, config->add_rpath);
+        }
+    }
+
     if (commands_buffer && modified) {
         off_t commands_offset = slice_offset + sizeof(struct mach_header_64);
         if (fseeko(file, commands_offset, SEEK_SET) != 0) {
@@ -871,7 +916,7 @@ bool process_binary(const char *filepath, const tool_config_t *config) {
         return false;
     }
 
-    if (success && (config->modify_cpu || config->modify_platform || config->convert_to_dylib)) {
+    if (success && (config->modify_cpu || config->modify_platform || config->convert_to_dylib || (config->add_rpath != NULL && config->add_rpath[0] != '\0'))) {
         printf("Wrote new binary to %s\n", filepath);
     }
     else {
